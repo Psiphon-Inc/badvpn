@@ -30,6 +30,10 @@
  * 
  * TAP device abstraction.
  */
+/*
+ * Psiphon customizations: Copyright (C) Psiphon Inc.
+ * Released under badvpn licence: https://github.com/ambrop72/badvpn#license
+ */
 
 #ifndef BADVPN_TUNTAP_BTAP_H
 #define BADVPN_TUNTAP_BTAP_H
@@ -106,6 +110,13 @@ typedef struct {
  * @return 1 on success, 0 on failure
  */
 int BTap_Init (BTap *o, BReactor *bsys, char *devname, BTap_handler_error handler_error, void *handler_error_user, int tun) WARN_UNUSED;
+
+// ==== PSIPHON ====
+
+int BTap_InitWithFD (BTap *o, BReactor *bsys, int fd, int mtu, BTap_handler_error handler_error, void *handler_error_user, int tun) WARN_UNUSED;
+void BTap_FreeWithFD (BTap *o);
+
+// ==== PSIPHON ====
 
 enum BTap_dev_type {BTAP_DEV_TUN, BTAP_DEV_TAP};
 

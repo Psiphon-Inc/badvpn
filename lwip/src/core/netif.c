@@ -35,6 +35,10 @@
  * Author: Adam Dunkels <adam@sics.se>
  *
  */
+/*
+ * Psiphon customizations: Copyright (C) Psiphon Inc.
+ * Released under badvpn licence: https://github.com/ambrop72/badvpn#license
+ */
 
 #include "lwip/opt.h"
 
@@ -206,7 +210,13 @@ netif_add(struct netif *netif, ip_addr_t *ipaddr, ip_addr_t *netmask,
 
   /* remember netif specific state information data */
   netif->state = state;
+#ifdef PSIPHON
+  /* tun2socks as a library, with a multi-run lifetime,
+     may invoke this multiple times */
+  netif->num = netif_num;
+#else
   netif->num = netif_num++;
+#endif /* PSIPHON */
   netif->input = input;
   NETIF_SET_HWADDRHINT(netif, NULL);
 #if ENABLE_LOOPBACK && LWIP_LOOPBACK_MAX_PBUFS

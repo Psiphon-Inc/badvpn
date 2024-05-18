@@ -26,6 +26,10 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+/*
+ * Psiphon customizations: Copyright (C) Psiphon Inc.
+ * Released under badvpn licence: https://github.com/ambrop72/badvpn#license
+ */
 
 #include <string.h>
 
@@ -151,7 +155,9 @@ void connector_handler (BSocksClient* o, int is_error)
     
     // check connection result
     if (is_error) {
-        BLog(BLOG_ERROR, "connection failed");
+        // PSIPHON
+        // BLog(BLOG_ERROR, "connection failed");
+        BLog(BLOG_WARNING, "connection failed");
         goto fail0;
     }
     

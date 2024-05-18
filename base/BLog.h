@@ -30,6 +30,10 @@
  * 
  * A global object for logging.
  */
+/*
+ * Psiphon customizations: Copyright (C) Psiphon Inc.
+ * Released under badvpn licence: https://github.com/ambrop72/badvpn#license
+ */
 
 #ifndef BADVPN_BLOG_H
 #define BADVPN_BLOG_H
@@ -117,6 +121,9 @@ static void BLog_ChannelContextLog (BLogChannelContext ccontext, int level, cons
 
 void BLog_InitStdout (void);
 void BLog_InitStderr (void);
+
+// PSIPHON
+void BLog_InitPsiphon (void);
 
 int BLogGlobal_GetChannelByName (const char *channel_name)
 {

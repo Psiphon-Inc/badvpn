@@ -25,12 +25,19 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
+/*
+ * Psiphon customizations: Copyright (C) Psiphon Inc.
+ * Released under badvpn licence: https://github.com/ambrop72/badvpn#license
+ */
 
 #include <stdint.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
 #include <limits.h>
+
+// PSIPHON
+#include "jni.h"
 
 #include <misc/version.h>
 #include <misc/loggers_string.h>
@@ -111,6 +118,12 @@ struct {
     int udpgw_max_connections;
     int udpgw_connection_buffer_size;
     int udpgw_transparent_dns;
+
+    // ==== PSIPHON ====
+    int tun_fd;
+    int tun_mtu;
+    int set_signal;
+    // ==== PSIPHON ====
 } options;
 
 // TCP client
@@ -201,6 +214,11 @@ LinkedList1 tcp_clients;
 // number of clients
 int num_clients;
 
+// ==== PSIPHON ====
+static void run (void);
+static void init_arguments (const char* program_name);
+// ==== PSIPHON ====
+
 static void terminate (void);
 static void print_help (const char *name);
 static void print_version (void);
@@ -237,6 +255,129 @@ static void client_socks_recv_handler_done (struct tcp_client *client, int data_
 static int client_socks_recv_send_out (struct tcp_client *client);
 static err_t client_sent_func (void *arg, struct tcp_pcb *tpcb, u16_t len);
 static void udpgw_client_handler_received (void *unused, BAddr local_addr, BAddr remote_addr, const uint8_t *data, int data_len);
+
+
+//==== PSIPHON ====
+
+#ifdef PSIPHON
+
+int g_terminate = 0;
+JNIEnv* g_env = 0;
+int sendKeepAlive = 1;
+
+void PsiphonLog(const char *levelStr, const char *channelStr, const char *msgStr)
+{
+    if (!g_env)
+    {
+        return;
+    }
+    // Note: we could cache the class and method references if log is called frequently
+
+    jstring level = (*g_env)->NewStringUTF(g_env, levelStr);
+    jstring channel = (*g_env)->NewStringUTF(g_env, channelStr);
+    jstring msg = (*g_env)->NewStringUTF(g_env, msgStr);
+
+    jclass cls = (*g_env)->FindClass(g_env, "ca/psiphon/PsiphonTunnel");
+    jmethodID logMethod = (*g_env)->GetStaticMethodID(g_env, cls, "logTun2Socks", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+    (*g_env)->CallStaticVoidMethod(g_env, cls, logMethod, level, channel, msg);
+
+    (*g_env)->DeleteLocalRef(g_env, cls);
+
+    (*g_env)->DeleteLocalRef(g_env, level);
+    (*g_env)->DeleteLocalRef(g_env, channel);
+    (*g_env)->DeleteLocalRef(g_env, msg);
+}
+
+JNIEXPORT jint JNICALL Java_ca_psiphon_PsiphonTunnel_runTun2Socks(
+    JNIEnv* env,
+    jclass cls,
+    jint vpnInterfaceFileDescriptor,
+    jint vpnInterfaceMTU,
+    jstring vpnIpAddress,
+    jstring vpnNetMask,
+    jstring socksServerAddress,
+    jstring udpgwServerAddress,
+    jint udpgwTransparentDNS)
+{
+    g_env = env;
+
+    const char* vpnIpAddressStr = (*env)->GetStringUTFChars(env, vpnIpAddress, 0);
+    const char* vpnNetMaskStr = (*env)->GetStringUTFChars(env, vpnNetMask, 0);
+    const char* socksServerAddressStr = (*env)->GetStringUTFChars(env, socksServerAddress, 0);
+    const char* udpgwServerAddressStr = (*env)->GetStringUTFChars(env, udpgwServerAddress, 0);
+
+    init_arguments("Psiphon tun2socks");
+
+    options.netif_ipaddr = (char*)vpnIpAddressStr;
+    options.netif_netmask = (char*)vpnNetMaskStr;
+    options.socks_server_addr = (char*)socksServerAddressStr;
+    options.udpgw_remote_server_addr = (char*)udpgwServerAddressStr;
+    options.udpgw_transparent_dns = udpgwTransparentDNS;
+    options.tun_fd = vpnInterfaceFileDescriptor;
+    options.tun_mtu = vpnInterfaceMTU;
+    options.set_signal = 0;
+    options.loglevel = 2;
+
+    BLog_InitPsiphon();
+
+    __sync_bool_compare_and_swap(&g_terminate, 1, 0);
+
+    run();
+
+    (*env)->ReleaseStringUTFChars(env, vpnIpAddress, vpnIpAddressStr);
+    (*env)->ReleaseStringUTFChars(env, vpnNetMask, vpnNetMaskStr);
+    (*env)->ReleaseStringUTFChars(env, socksServerAddress, socksServerAddressStr);
+    (*env)->ReleaseStringUTFChars(env, udpgwServerAddress, udpgwServerAddressStr);
+
+    g_env = 0;
+
+    // TODO: return success/error
+
+    return 1;
+}
+
+JNIEXPORT jint JNICALL Java_ca_psiphon_PsiphonTunnel_terminateTun2Socks(
+    jclass cls,
+    JNIEnv* env)
+{
+    __sync_bool_compare_and_swap(&g_terminate, 0, 1);
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_ca_psiphon_PsiphonTunnel_disableUdpGwKeepalive(
+    jclass cls,
+    JNIEnv* env)
+{
+    __sync_bool_compare_and_swap(&sendKeepAlive, 1, 0);
+    return 0;
+}
+
+JNIEXPORT jint JNICALL Java_ca_psiphon_PsiphonTunnel_enableUdpGwKeepalive(
+    jclass cls,
+    JNIEnv* env)
+{
+    __sync_bool_compare_and_swap(&sendKeepAlive, 0, 1);
+    return 0;
+}
+
+// from tcp_helper.c
+/** Remove all pcbs on the given list. */
+static void tcp_remove(struct tcp_pcb* pcb_list)
+{
+    struct tcp_pcb *pcb = pcb_list;
+    struct tcp_pcb *pcb2;
+
+    while(pcb != NULL)
+    {
+        pcb2 = pcb;
+        pcb = pcb->next;
+        tcp_abort(pcb2);
+    }
+}
+
+//==== PSIPHON ====
+
+#else
 
 int main (int argc, char **argv)
 {
@@ -281,7 +422,16 @@ int main (int argc, char **argv)
         default:
             ASSERT(0);
     }
-    
+
+    run();
+
+    return 1;
+}
+
+#endif
+
+void run()
+{
     // configure logger channels
     for (int i = 0; i < BLOG_NUM_CHANNELS; i++) {
         if (options.loglevels[i] >= 0) {
@@ -321,16 +471,28 @@ int main (int argc, char **argv)
     // set not quitting
     quitting = 0;
     
-    // setup signal handler
-    if (!BSignal_Init(&ss, signal_handler, NULL)) {
-        BLog(BLOG_ERROR, "BSignal_Init failed");
-        goto fail2;
+    // PSIPHON
+    if (options.set_signal) {
+        // setup signal handler
+        if (!BSignal_Init(&ss, signal_handler, NULL)) {
+            BLog(BLOG_ERROR, "BSignal_Init failed");
+            goto fail2;
+        }
     }
-    
-    // init TUN device
-    if (!BTap_Init(&device, &ss, options.tundev, device_error_handler, NULL, 1)) {
-        BLog(BLOG_ERROR, "BTap_Init failed");
-        goto fail3;
+
+    // PSIPHON
+    if (options.tun_fd) {
+        // use supplied file descriptor
+        if (!BTap_InitWithFD(&device, &ss, options.tun_fd, options.tun_mtu, device_error_handler, NULL, 1)) {
+            BLog(BLOG_ERROR, "BTap_InitWithFD failed");
+            goto fail3;
+        }
+    } else {
+        // init TUN device
+        if (!BTap_Init(&device, &ss, options.tundev, device_error_handler, NULL, 1)) {
+            BLog(BLOG_ERROR, "BTap_Init failed");
+            goto fail3;
+        }
     }
     
     // NOTE: the order of the following is important:
@@ -426,7 +588,25 @@ int main (int argc, char **argv)
     if (have_netif) {
         netif_remove(&netif);
     }
+
+    // ==== PSIPHON ====
+    // The existing tun2socks cleanup sometimes leaves some TCP connections
+    // in the TIME_WAIT state. With regular tun2socks, these will be cleaned up
+    // by process termination. Since we re-init tun2socks within one process,
+    // and tcp_bind_to_netif requires no TCP connections bound to the network
+    // interface, we need to explicitly clean these up. Since we're also closing
+    // both sources of tunneled packets (VPN fd and SOCKS sockets), there should
+    // be no need to keep these TCP connections in TIME_WAIT between tun2socks
+    // invocations.
+    // After further testing, we found at least one TCP connection left in the
+    // active list (with state SYN_RCVD). Now we're aborting the active list
+    // as well, and the bound list for good measure.
+    tcp_remove(tcp_bound_pcbs);
+    tcp_remove(tcp_active_pcbs);
+    tcp_remove(tcp_tw_pcbs);
+    // ==== PSIPHON ====
     
+
     BReactor_RemoveTimer(&ss, &tcp_timer);
     BFree(device_write_buf);
 fail5:
@@ -449,8 +629,6 @@ fail1:
     BLog_Free();
 fail0:
     DebugObjectGlobal_Finish();
-    
-    return 1;
 }
 
 void terminate (void)
@@ -505,18 +683,16 @@ void print_version (void)
     printf(GLOBAL_PRODUCT_NAME" "PROGRAM_NAME" "GLOBAL_VERSION"\n"GLOBAL_COPYRIGHT_NOTICE"\n");
 }
 
-int parse_arguments (int argc, char *argv[])
+//==== PSIPHON ====
+
+void init_arguments (const char* program_name)
 {
-    if (argc <= 0) {
-        return 0;
-    }
-    
     options.help = 0;
     options.version = 0;
     options.logger = LOGGER_STDOUT;
     #ifndef BADVPN_USE_WINAPI
     options.logger_syslog_facility = "daemon";
-    options.logger_syslog_ident = argv[0];
+    options.logger_syslog_ident = (char*)program_name;
     #endif
     options.loglevel = -1;
     for (int i = 0; i < BLOG_NUM_CHANNELS; i++) {
@@ -535,6 +711,21 @@ int parse_arguments (int argc, char *argv[])
     options.udpgw_max_connections = DEFAULT_UDPGW_MAX_CONNECTIONS;
     options.udpgw_connection_buffer_size = DEFAULT_UDPGW_CONNECTION_BUFFER_SIZE;
     options.udpgw_transparent_dns = 0;
+
+    options.tun_fd = 0;
+    options.set_signal = 1;
+}
+
+//==== PSIPHON ====
+
+int parse_arguments (int argc, char *argv[])
+{
+    if (argc <= 0) {
+        return 0;
+    }
+    
+    // PSIPHON
+    init_arguments(argv[0]);
     
     int i;
     for (i = 1; i < argc; i++) {
@@ -951,6 +1142,23 @@ void tcp_timer_handler (void *unused)
 {
     ASSERT(!quitting)
     
+    // ==== PSIPHON ====
+
+    // Check if the terminate flag has been set by Psiphon.
+
+    // TODO: instead of piggybacking on this timer,
+    // we could perhaps write to a pipe hooked into
+    // the BReactor event loop, which would eliminate
+    // any shutdown delay due to waiting for this timer.
+
+    if (__sync_bool_compare_and_swap(&g_terminate, 1, 1)) {
+        BLog(BLOG_NOTICE, "g_terminate is set");
+        terminate();
+        return;
+    }
+
+    // ==== PSIPHON ====
+
     BLog(BLOG_DEBUG, "TCP timer");
     
     // schedule next timer
@@ -1292,6 +1500,10 @@ err_t listener_accept_func (void *arg, struct tcp_pcb *newpcb, err_t err)
     
     // set client not closed
     client->client_closed = 0;
+    
+    // From: https://github.com/shadowsocks/shadowsocks-android/commit/97cfd1f8698d8f59b146bbcf345eec0fe1ca260
+    // enable TCP_NODELAY
+    tcp_nagle_disable(client->pcb);
     
     // setup handler argument
     tcp_arg(client->pcb, client);
